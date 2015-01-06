@@ -1,0 +1,103 @@
+#!/usr/bin/env ruby
+
+require 'json'
+require 'mail'
+require 'mechanize'
+
+abort "usage: #{$0} uvdb.json" if ARGV[0].nil?
+file = ARGV[0]
+
+# If the file exists and parses as JSON
+begin
+  # Create the empty JSON file if it doesn't exist
+  File.open(file, 'w').close unless File.exists? file
+
+  @json = JSON.parse(File.read file)
+  puts "Parsing UV DB file: #{file}"
+
+# If the file doesn't parse as JSOn or doesn't exist
+# open the file for writing
+rescue JSON::ParserError => e
+  puts "ERROR Parsing UV DB file: #{file}"
+  @json = File.open(file, 'w')
+  #@json.write(JSON.pretty_generate(Array[Hash[]]))
+  # Initialize an empty JSON db
+  @json.write(JSON.pretty_generate(Array[Hash[]]))
+  @json.close
+ensure
+  # Read the empty JSON db
+  @json = JSON.parse(File.read file)
+  @json.reject!{|j| j['movie'].nil? }
+end
+
+agent = Mechanize.new
+agent.user_agent_alias = 'Mac Safari'
+
+# Example UV movie link
+# http://www.familyvideo.com/catalog/product_info.php?products_id=444260
+@url  = 'http://www.familyvideo.com'
+@uri  = @url + '/catalog/advanced_search_result.php?whatType=all&whatText=ultraviolet+code&title=ultraviolet+code&person='
+
+match = Array.new
+page  = agent.get(@uri)
+cont  = String.new #page.link_with(:text => 'next')
+
+until cont == nil
+  # find if there is another next link
+  cont = page.link_with(:text => 'next')
+
+  #  XPath parse for:
+  # <span class="rh3pricingBuy">$5.00</span>
+  prices = page.parser.xpath("//span[contains(@class,'rh3pricingBuy')]/text()").collect {|node| node.text.strip}
+  prices.delete('')
+  
+  # Find all of the links for UltraViolet codes
+  page.links_with(:text => /UltraViolet CODE/i).uniq{|link| link.text.strip }.each_with_index do |link,idx|
+    id = link.href.split('=')[1]
+    next if @json.find{|m| m['id'] == id }
+    match << { :movie => link.text.strip, :url => @url + link.href, :id => id, :price => prices[idx] }
+  end
+
+  # Click on the next link and load that page
+  page = page.link_with(:text => 'next').click unless cont == nil
+end
+
+if @json.is_a? File
+  puts "Writing #{match.size} entries to initial UVRecon DB file: #{file}"
+  @json.write(JSON.pretty_generate(match))
+  @json.close
+
+elsif @json.is_a? Array and match.size > 0
+  puts "Merging #{match.size} new movies with UVBRecon DB file: #{file}"
+  @json << match
+  File.open(file, 'w').write(JSON.pretty_generate(@json.flatten))
+
+else
+  puts "No new UV movies were found."
+
+end
+
+# If we found UV movies, create our Email body
+if match.size > 0
+  body = String.new
+  match.each do |m|
+    body << "#{m[:price]}: #{m[:movie]}\n#{m[:url]}\n" + '-'*m[:url].size + "\n"
+  end
+
+  # TODO make sure mail works
+  puts
+  puts body
+  exit
+  
+  # Send that shit
+  Mail.deliver do
+    from     'foo@bar.com'
+    to       'baz@foo.com'
+    subject  "[uvrecon] #{match.size} new UltraViolet titles found!"
+    body     body
+  end
+end
+  
+exit
+
+# EOF
